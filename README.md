@@ -1,137 +1,134 @@
 # Shardwise
 
-**Shardwise** is a horizontally scalable, microservice-based system for computing backpropagation gradients in a distributed fashion. Built as a capstone project for mastering real-world system design principles, Shardwise is not a product — it's an **engineering statement.**
+Shardwise is a planned fault-tolerant distributed execution framework for AI and data-processing workloads. It will coordinate dependency-aware tasks through a Paxos-inspired metadata service, execute them across replicated worker groups, and recover from node failures.
 
-## 🚀 What It Does
+The project is designed to run locally on Apple Silicon using free, open-source infrastructure. No cloud account, paid service, or GPU is required.
 
-Shardwise accepts model parameters and forward-pass inputs, splits the gradient computation into discrete tasks, and dispatches them across a fleet of compute microservices. Results are asynchronously collected, cached, and streamed back to the requester.
+## Current status
 
-## 🎯 Goals
+The repository currently contains an initial Rust scaffold. The services, protocols, workloads, and guarantees described below are the implementation targets, not completed capabilities. The starter executable is not yet a working framework.
 
-* Showcase deep understanding of system design fundamentals
-* Build an elastic, fault-tolerant gradient compute system
-* Demonstrate DevOps and infra engineering skills (Docker, Redis, Kafka, Nginx)
-* Explore CAP tradeoffs through real-world design decisions
+## Goals
 
----
+- Implement durable leader election and metadata consensus with strict-majority recovery.
+- Separate replicated coordination metadata from replicated worker storage.
+- Schedule task dependency graphs and recover interrupted work without publishing duplicate results.
+- Demonstrate real AI and data-processing workloads, rather than only synthetic tasks.
+- Measure throughput, latency, resource use, and recovery behavior under controlled failures.
+- Keep development, demonstrations, and benchmarks entirely local and free.
 
-## 🧱 Architecture Overview
+## Architecture
 
-### Components:
-
-| Service               | Description                                                |
-| --------------------- | ---------------------------------------------------------- |
-| **API Gateway**       | Accepts HTTP requests and routes to backend services       |
-| **Shard Scheduler**   | Breaks gradient jobs into tasks and pushes to Kafka        |
-| **Worker Pool**       | Stateless microservices that compute partial gradients     |
-| **Result Aggregator** | Pulls partial results, combines gradients, and stores them |
-| **Cache Layer**       | Redis-based, caches frequent inputs/results                |
-| **Result Store**      | PostgreSQL DB storing metadata and computed gradients      |
-| **Monitoring**        | Prometheus + Grafana for system health and metrics         |
-
-### Message Flow:
-
-1. Client sends POST to `/api/backprop`
-2. API Gateway routes to `Shard Scheduler`
-3. Scheduler shards job and pushes messages to Kafka
-4. Worker Pool subscribes to Kafka topics, computes gradients
-5. Results are aggregated and stored
-6. User fetches result via `/api/result/:id` or receives streaming update
-
----
-
-## 🛠️ Tech Stack
-
-| Layer          | Tech Used                 |
-| -------------- | ------------------------- |
-| API & Services | Python (FastAPI), Node.js |
-| Queueing       | Kafka or RabbitMQ         |
-| Caching        | Redis                     |
-| DB             | PostgreSQL                |
-| Orchestration  | Docker + Docker Compose   |
-| Load Balancing | Nginx                     |
-| Monitoring     | Prometheus, Grafana       |
-
----
-
-## ⚖️ Devverse Design Mappings
-
-| Devverse Topic            | Implementation in Shardwise                       |
-| ------------------------- | ------------------------------------------------- |
-| Monolith vs Microservices | Broken into 6+ clear services                     |
-| Load Balancing & Scaling  | Nginx + horizontally-scalable workers             |
-| Caching                   | Redis for input/result caching                    |
-| Message Queues            | Kafka used for async compute pipelines            |
-| Scalable API              | REST endpoints documented via Swagger/OpenAPI     |
-| CAP Theorem               | Prioritize A for ingestion, C for result delivery |
-| Nginx                     | Used as reverse proxy + load balancer             |
-
----
-
-## 📦 API Endpoints
-
-### POST `/api/backprop`
-
-**Description:** Submit a new gradient job
-**Body:**
-
-```json
-{
-  "model": "MLP",
-  "inputs": [[1.0, 2.0]],
-  "weights": [[0.5, -0.2], [1.3, 0.7]]
-}
+```mermaid
+flowchart TD
+    Client[Client / CLI] --> API[Rust API]
+    API --> Meta[Replicated metadata service\nPaxos-inspired consensus]
+    Meta --> Scheduler[Rust DAG scheduler]
+    Scheduler --> Kafka[Kafka\nTask dispatch and events]
+    Kafka --> Workers[Worker groups\nRust agents + Python task processes]
+    Workers --> Storage[Replicated local storage\nInputs, checkpoints, outputs]
+    Workers --> Meta
+    API --> Redis[Redis\nDisposable cache]
+    Kafka --> History[History projector]
+    History --> Postgres[PostgreSQL\nQueryable job history]
+    Monitor[Prometheus + Grafana] -.-> Meta
+    Monitor -.-> Scheduler
+    Monitor -.-> Workers
 ```
 
-**Response:**
+### Metadata and consensus
 
-```json
-{ "job_id": "abc123" }
-```
+A separate metadata quorum will own authoritative coordination state: job graphs, task transitions, worker membership, replica placement, and accepted results.
 
-### GET `/api/result/:job_id`
+The Paxos-inspired protocol will cover election, quorum-backed log replication, durable promises and accepted values, and replay after restart. A typical local configuration will use three metadata nodes, requiring two votes to make progress. A five-node configuration would require three votes.
 
-Returns computed gradients or processing status.
+Leader changes must preserve previously chosen values. Terms or ballots and fencing checks will prevent an obsolete leader or task attempt from committing new authoritative state. Nodes without a majority will stop metadata writes until quorum is restored; a minority must never elect itself into authority.
 
-### GET `/api/status/:job_id`
+This targets crash and network-partition failures, not malicious nodes. Protocol safety and recovery will need deterministic tests and fault injection before these guarantees can be claimed as implemented.
 
-Returns status: `queued`, `processing`, `done`, `failed`
+### Hierarchical replicated storage
 
----
+The metadata service will track data ownership and placement without storing bulk workload data in its consensus log. Worker groups will replicate task inputs, available checkpoints, and outputs across local disks belonging to distinct worker nodes.
 
-## 📈 Scaling Strategy
+Replica placement, acknowledgements, checksums, and repair will be explicit. A task result will become authoritative only after its configured storage durability requirement is satisfied and the metadata quorum accepts its commit. Metadata quorum size and data replication factor are separate settings.
 
-* Stateless services = trivially scalable
-* Horizontal pod autoscaling on Worker Pool
-* Kafka consumers scale with partitions
-* Redis reduces compute for repeated queries
+After a worker fails, another worker can read surviving replicas and resume from a supported checkpoint or retry the task. Lost replicas will be rebuilt from surviving copies. If every copy of required data is lost, recovery requires a reproducible source or resubmission.
 
----
+### Dependency-aware execution
 
-## 📊 Monitoring & Observability
+Clients will submit directed acyclic graphs (DAGs) whose tasks declare dependencies, inputs, resource needs, and retry policies. The scheduler will reject cycles and release a task only after its prerequisites have committed successfully.
 
-* **Prometheus** tracks job latency, worker load
-* **Grafana** dashboards show system health
-* **AlertManager** (optional) for real-time ops alerts
+Rust worker agents will handle dispatch, storage, heartbeats, and task lifecycle management. Python processes will execute registered AI and data-processing task functions. The initial interface will support user-defined graphs built from registered task types; arbitrary untrusted code execution is outside the initial scope.
 
----
+The first example workloads will be:
 
-## 🧪 Testing & Simulation
+- **AI:** partitioned gradient computation for a small CPU model, followed by gradient aggregation and comparison with a single-process reference.
+- **Data processing:** partitioned transforms and aggregations, with intermediate artifacts shared through replicated storage.
 
-* Includes test harness to simulate large job loads
-* Metrics tracking for throughput, failure rate
-* Can integrate mock models to simulate training pipelines
+### Infrastructure responsibilities
 
----
+| Component | Responsibility |
+| --- | --- |
+| Rust metadata service | Authoritative coordination state, leader election, consensus, durable recovery |
+| Rust API and scheduler | Job submission, graph validation, dependency resolution, task placement |
+| Rust worker agents | Task lifecycle, storage replication, health reporting, recovery |
+| Python task processes | AI and data-processing implementations using native numerical libraries where useful |
+| Kafka | Durable task dispatch and lifecycle events; delivery may be repeated |
+| Redis | Disposable caching; cache loss must not invalidate authoritative state |
+| PostgreSQL | Queryable job history and reporting projections; coordination authority remains in the metadata service |
+| Prometheus and Grafana | Cluster health, workload metrics, and recovery visibility |
+| Docker Compose | Reproducible local orchestration |
 
-## 📄 License & Intent
+Kafka publication and metadata commits will require a recoverable publication workflow and reconciliation. Consumers will deduplicate repeated events. PostgreSQL projections may lag authoritative state, and APIs will distinguish historical views from authoritative status.
 
-This project is educational and experimental. Shardwise is not meant for production use, but as a **resume-level showcase of distributed system design**.
+Rust is the default for performance-sensitive infrastructure. Python provides access to the AI and data ecosystem. Go can be introduced for a bounded component if measurements or a concrete library advantage justify another runtime; adding languages is not itself a performance optimization.
 
----
+## Failure and execution semantics
 
-## 👨‍🚀 Author
+| Condition | Intended behavior |
+| --- | --- |
+| Metadata leader crashes | A surviving majority elects a leader and recovers chosen metadata |
+| Metadata network partitions | Only a partition with a strict majority can advance authoritative state |
+| Worker crashes or stops reporting | Work is reassigned after failure detection; stale attempts are fenced at commit |
+| Task or event is delivered twice | Repeated execution is possible; authoritative result commits are deduplicated |
+| Data replica fails | Read surviving copies and repair replication when capacity is available |
+| Redis is unavailable | Bypass the cache and use durable sources |
+| PostgreSQL is unavailable | History views may be unavailable or stale; projection resumes after recovery |
+| Kafka is unavailable | Dispatch and event processing pause; durable coordination state supports reconciliation after recovery |
 
-**Ved Panse**
-[vedpanse.com](https://vedpanse.com)
+Execution will be **at least once**, with a single accepted result per logical task. This does not guarantee exactly-once execution or exactly-once effects in external systems. Tasks that write external state must provide their own idempotency mechanism.
+
+An acknowledged result's survival depends on the configured replica durability policy and surviving disks. Running several containers on one laptop demonstrates process and simulated network failures; it does not protect against losing that laptop or its disk.
+
+## Local development and deployment
+
+All planned services will run on one Apple Silicon Mac through Docker Compose, using ARM64-compatible images and CPU workloads. Replica counts, worker concurrency, workload size, and observability services will be configurable to fit available memory.
+
+No setup command is published yet because the runnable cluster has not been implemented. A working local quickstart will be added with the first end-to-end milestone.
+
+## Implementation milestones
+
+1. **Protocol foundation:** define state machines and failure assumptions; implement durable consensus, leader election, replay, and deterministic protocol tests.
+2. **Replicated storage:** implement worker identities, artifact checksums, configurable replication acknowledgements, replica reads, and repair.
+3. **End-to-end execution:** add the submission API, DAG scheduler, Kafka dispatch, Python task execution, and fenced result commits.
+4. **Recovery and observability:** add failure detection, retries, reconciliation, Redis caching, PostgreSQL history, and cluster dashboards.
+5. **Workload demonstrations:** run the gradient and data-processing pipelines and validate their outputs against reference implementations.
+6. **Reliability and performance evidence:** automate failure scenarios, benchmark the local cluster, and document results and limits.
+
+## Validation and performance
+
+Correctness comes before optimization. Tests will exercise concurrent proposals, leader changes, partitions, restarts, delayed messages, duplicate deliveries, and stale workers. Storage checks will cover corrupted or missing replicas and recovery from surviving copies.
+
+Benchmarks will report task throughput, end-to-end and scheduling latency, metadata commit latency, recovery time, replication overhead, and CPU and memory use. Every result will include hardware, workload, payload sizes, concurrency, replica counts, and comparison with a single-worker baseline.
+
+The performance goal is efficient execution with demonstrated improvements, not an unsupported claim to be the fastest framework. Local experiments can establish correctness and scaling behavior within one machine; claims about large-scale, multi-machine operation require corresponding evidence.
+
+## Project intent
+
+Shardwise is an educational systems project intended to demonstrate distributed coordination, replicated storage, dependency-aware execution, and measurable fault recovery. Resume claims will be backed by implemented behavior, reproducible tests, and published measurements as the milestones are completed.
+
+## Author
+
+**Ved Panse** — [vedpanse.com](https://vedpanse.com)
+
 UC San Diego | B.S. Math-CS & Data Science
