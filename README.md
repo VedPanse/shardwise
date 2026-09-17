@@ -123,12 +123,7 @@ Benchmarks will report task throughput, end-to-end and scheduling latency, metad
 
 The performance goal is efficient execution with demonstrated improvements, not an unsupported claim to be the fastest framework. Local experiments can establish correctness and scaling behavior within one machine; claims about large-scale, multi-machine operation require corresponding evidence.
 
-## Project intent
-
-Shardwise is an educational systems project intended to demonstrate distributed coordination, replicated storage, dependency-aware execution, and measurable fault recovery. Resume claims will be backed by implemented behavior, reproducible tests, and published measurements as the milestones are completed.
 
 ## Author
 
 **Ved Panse** — [vedpanse.com](https://vedpanse.com)
-
-UC San Diego | B.S. Math-CS & Data Science
