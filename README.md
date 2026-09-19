@@ -8,6 +8,8 @@ The project is designed to run locally on Apple Silicon using free, open-source 
 
 The repository currently contains an initial Rust scaffold. The services, protocols, workloads, and guarantees described below are the implementation targets, not completed capabilities. The starter executable is not yet a working framework.
 
+Implementation is divided into runnable baselines below. Start with **Baseline 1**; the detailed checklist is in [TODO.md](TODO.md). All baselines are currently planned.
+
 ## Goals
 
 - Implement durable leader election and metadata consensus with strict-majority recovery.
@@ -17,7 +19,7 @@ The repository currently contains an initial Rust scaffold. The services, protoc
 - Measure throughput, latency, resource use, and recovery behavior under controlled failures.
 - Keep development, demonstrations, and benchmarks entirely local and free.
 
-## Architecture
+## Target architecture
 
 ```mermaid
 flowchart TD
@@ -83,7 +85,7 @@ Kafka publication and metadata commits will require a recoverable publication wo
 
 Rust is the default for performance-sensitive infrastructure. Python provides access to the AI and data ecosystem. Go can be introduced for a bounded component if measurements or a concrete library advantage justify another runtime; adding languages is not itself a performance optimization.
 
-## Failure and execution semantics
+## Target failure and execution semantics
 
 | Condition | Intended behavior |
 | --- | --- |
@@ -106,14 +108,68 @@ All planned services will run on one Apple Silicon Mac through Docker Compose, u
 
 No setup command is published yet because the runnable cluster has not been implemented. A working local quickstart will be added with the first end-to-end milestone.
 
-## Implementation milestones
+## Implementation baselines
 
-1. **Protocol foundation:** define state machines and failure assumptions; implement durable consensus, leader election, replay, and deterministic protocol tests.
-2. **Replicated storage:** implement worker identities, artifact checksums, configurable replication acknowledgements, replica reads, and repair.
-3. **End-to-end execution:** add the submission API, DAG scheduler, Kafka dispatch, Python task execution, and fenced result commits.
-4. **Recovery and observability:** add failure detection, retries, reconciliation, Redis caching, PostgreSQL history, and cluster dashboards.
-5. **Workload demonstrations:** run the gradient and data-processing pipelines and validate their outputs against reference implementations.
-6. **Reliability and performance evidence:** automate failure scenarios, benchmark the local cluster, and document results and limits.
+Each baseline builds on the previous one and ends with a runnable demonstration and explicit completion checks. The target architecture above describes the completed system; its fault-tolerance guarantees do not apply to the initial baseline.
+
+### Baseline 1 — Submit, execute, retrieve
+
+**Objective:** get the smallest complete job flow running locally.
+
+```text
+Client → Rust coordinator/API ← HTTP polling by Rust worker agent → Python task runner
+                  ↑                         |
+                  └──── result report ──────┘
+```
+
+Run one coordinator and one worker as separate processes. The coordinator owns an in-memory queue and job state. The worker claims one task at a time over HTTP, invokes a registered Python function through a JSON input/output contract, and reports success or failure. A job contains exactly one task in this baseline.
+
+| Interface | Baseline 1 behavior |
+| --- | --- |
+| `GET /health` | Reports coordinator readiness |
+| `POST /jobs` | Validates a registered task and input; returns `202` with a job ID |
+| `GET /jobs/{id}` | Returns `queued`, `running`, `succeeded`, or `failed`, plus the result or error when available |
+| Internal worker API | Atomically claims queued work and accepts a result only for its assigned attempt |
+
+The first task is `sum_numbers`, with an input such as `{"numbers": [1, 2, 3, 4]}` and a result of `{"sum": 10}`. This intentionally small workload validates the execution path before adding AI dependencies. Unknown tasks, invalid inputs, and unknown job IDs return clear errors.
+
+Python task failures and execution timeouts become failed jobs. Repeated reports for the same completed attempt are harmless; conflicting or unassigned reports are rejected. Coordinator restart loses jobs, and worker termination can leave a job running: durable state and automatic recovery arrive later.
+
+**Included:** bounded input size, one-task worker concurrency, configurable local addresses, structured logs with job/attempt IDs, an end-to-end smoke test, and a documented native quickstart. Docker Compose is optional at this stage; Rust and Python are the only required runtimes.
+
+**Deferred:** DAGs, automatic retries, durable storage, consensus, replication, Kafka, Redis, PostgreSQL, dashboards, checkpointing, and GPU workloads.
+
+**Complete when:** a fresh local checkout can launch both processes, submit the example, retrieve `10`, observe a Python failure as a failed job, and pass the documented smoke test without paid services.
+
+### Baseline 2 — Dependency-aware execution
+
+Add validated DAG submissions, multiple workers, dependency output references, and bounded scheduling. Keep the single coordinator and direct HTTP transport while establishing task-state semantics. A failed prerequisite must block its dependents and produce a terminal failed job rather than leave it waiting forever.
+
+**Complete when:** a partitioned data transform and aggregation produces the reference result across two workers; cycles and missing dependencies are rejected; dependent tasks never start before successful prerequisites.
+
+### Baseline 3 — Durable metadata consensus
+
+Replace in-memory coordination authority with three metadata nodes using the Paxos-inspired protocol. Implement durable ballots/promises, accepted values, log replication, leader recovery, replay, and authoritative reads. Scheduler decisions and task transitions must go through consensus. Keep cluster membership fixed initially.
+
+**Complete when:** a two-node majority can continue after one metadata node fails; a minority cannot advance state; restart and leader replacement preserve chosen values. Deterministic tests must cover competing proposals, delayed messages, and partitions.
+
+### Baseline 4 — Replicated artifacts and worker recovery
+
+Separate bulk artifacts from metadata and replicate inputs and outputs across worker disks. Add checksums, durable replica acknowledgements, placement metadata, heartbeats, attempt fencing, bounded retries, and replica repair. Use two data copies on distinct workers for the first demo; commit results only after the configured data durability requirement is met. Checkpoint/resume support is a later extension; initial recovery reruns tasks from surviving inputs.
+
+**Complete when:** losing one worker preserves acknowledged artifacts, interrupted work runs on a survivor, stale attempts cannot replace accepted results, and missing replicas are repaired when capacity returns.
+
+### Baseline 5 — Kafka dispatch and operational views
+
+Replace direct task polling with Kafka dispatch and lifecycle events while retaining the metadata quorum as authority. Add recoverable event publication, reconciliation, duplicate handling, Redis caching, PostgreSQL history projections, and Prometheus/Grafana monitoring. Provide an ARM64 Docker Compose setup with persistent volumes and optional observability services.
+
+**Complete when:** broker interruption and repeated delivery do not lose committed task transitions or create conflicting results; cache loss is harmless; history catches up after PostgreSQL recovery; the local cluster can be started with documented commands.
+
+### Baseline 6 — AI workloads and measured reliability
+
+Add the CPU gradient-computation DAG and compare it with a single-process numerical reference. Package automated failure demonstrations and benchmarks for both AI and data-processing workloads. Record throughput, latency, resource use, and recovery time alongside hardware and configuration.
+
+**Complete when:** both workloads produce validated results, failure scenarios are reproducible, and measured local results are published with their limits. Large-scale, multi-machine performance remains unclaimed without supporting measurements.
 
 ## Validation and performance
 
